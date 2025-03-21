@@ -5,7 +5,6 @@ Ultra-Maximized HFT Trading Strategy Runner
 - Win rate above 55%
 - Positive equity curve
 """
-
 import os
 import sys
 import time
@@ -15,6 +14,8 @@ import pandas as pd
 import numpy as np
 import random
 import math
+import statistics
+from collections import defaultdict
 from sklearn import tree
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
@@ -147,6 +148,65 @@ class MarketRegimeDetector:
         from collections import Counter
         return Counter(self.regime_history).most_common(1)[0][0]
         
+    def get_trend_strength(self, df):
+        """
+        Calculate the trend strength using linear regression slope and r-squared value
+        
+        Args:
+            df: DataFrame with price data
+            
+        Returns:
+            float: Trend strength value between 0.0 and 1.0
+        """
+        if len(df) < self.lookback_period:
+            return 0.5  # Default value if not enough data
+            
+        # Get recent data
+        recent_data = df.iloc[-self.lookback_period:]
+        
+        # Calculate trend strength using linear regression slope
+        y = recent_data['close'].values
+        x = np.array(range(len(y)))
+        slope, _, r_value, _, _ = linregress(x, y)
+        
+        # Normalize trend strength to 0-1 range
+        trend_strength = abs(r_value) * (1 + np.sign(slope) * 0.5)
+        
+        # Ensure the value is between 0 and 1
+        return max(0.0, min(1.0, trend_strength))
+        
+    def get_volatility(self, df):
+        """
+        Calculate market volatility using normalized ATR (Average True Range)
+        
+        Args:
+            df: DataFrame with price data
+            
+        Returns:
+            float: Volatility value between 0.0 and 1.0
+        """
+        if len(df) < self.lookback_period:
+            return 0.5  # Default value if not enough data
+            
+        # Get recent data
+        recent_data = df.iloc[-self.lookback_period:].copy()
+        
+        # Calculate volatility (normalized ATR)
+        recent_data['tr'] = np.maximum(
+            np.maximum(
+                recent_data['high'] - recent_data['low'],
+                abs(recent_data['high'] - recent_data['close'].shift(1))
+            ),
+            abs(recent_data['low'] - recent_data['close'].shift(1))
+        )
+        atr = recent_data['tr'].rolling(14).mean().iloc[-1]
+        normalized_atr = atr / recent_data['close'].iloc[-1]
+        
+        # Scale to 0-1 range (assuming max volatility is around 0.05 or 5%)
+        volatility = min(1.0, normalized_atr * 20)
+        
+        return volatility
+        
     def adjust_parameters(self, base_params, current_regime):
         """Adjust strategy parameters based on the current market regime"""
         params = base_params.copy()
@@ -178,6 +238,113 @@ class MarketRegimeDetector:
         return params
 
 # Add DynamicExitSystem for more sophisticated exit management
+
+class AdvancedPositionSizing:
+    """Advanced position sizing system with multiple adjustment factors"""
+    
+    def __init__(self, max_position_size=100.0, initial_risk_per_trade=0.02, max_risk_per_trade=0.05,
+                 max_open_risk=0.25, volatility_adjustment=True, win_streak_adjustment=True,
+                 trend_adjustment=True, account_growth_adjustment=True, min_order_size=0.01, max_order_size = 1000.0):
+        """Initialize the advanced position sizing system"""
+        self.max_position_size = max_position_size
+        self.initial_risk_per_trade = initial_risk_per_trade
+        self.max_risk_per_trade = max_risk_per_trade
+        self.max_open_risk = max_open_risk
+        self.volatility_adjustment = volatility_adjustment
+        self.win_streak_adjustment = win_streak_adjustment
+        self.trend_adjustment = trend_adjustment
+        self.account_growth_adjustment = account_growth_adjustment
+        self.min_order_size = min_order_size
+        self.max_order_size = max_order_size
+        self.win_streak = 0
+        self.loss_streak = 0
+        self.initial_balance = 1000.0  # Default initial balance
+        self.current_balance = 1000.0  # Default current balance
+        
+    def calculate_position_size(self, market_regime, trend_strength, volatility, signal_strength, win_streak=0, loss_streak=0):
+        """Calculate position size based on multiple factors
+        
+        Args:
+            market_regime: Current market regime (bullish, bearish, neutral)
+            trend_strength: Strength of the current trend (0.0 to 1.0)
+            volatility: Current market volatility
+            signal_strength: Strength of the trading signal (0.0 to 1.0)
+            win_streak: Current win streak
+            loss_streak: Current loss streak
+            
+        Returns:
+            float: Calculated position size
+        """
+        # Update streak counters
+        self.win_streak = win_streak
+        self.loss_streak = loss_streak
+        
+        # Base position size
+        base_position = self.max_position_size * 0.1  # Start with 10% of max
+        
+        # Apply market regime adjustment
+        regime_factor = 1.0
+        if market_regime == 'bullish':
+            regime_factor = 1.5
+        elif market_regime == 'bearish':
+            regime_factor = 0.7
+        
+        # Apply trend strength adjustment
+        if self.trend_adjustment and trend_strength is not None:
+            # Convert trend_strength to float if it's a sequence
+            if hasattr(trend_strength, '__len__') and not isinstance(trend_strength, str):
+                trend_strength = float(trend_strength[0]) if len(trend_strength) > 0 else 0.5
+            trend_factor = 1.0 + float(trend_strength)
+        else:
+            trend_factor = 1.0
+        
+        # Apply volatility adjustment
+        if self.volatility_adjustment and volatility is not None:
+            # Convert volatility to float if it's a sequence
+            if hasattr(volatility, '__len__') and not isinstance(volatility, str):
+                volatility = float(volatility[0]) if len(volatility) > 0 else 0.02
+            # Reduce position size in high volatility
+            volatility_factor = 1.0 / (1.0 + float(volatility) * 10) if float(volatility) > 0 else 1.0
+            volatility_factor = max(0.2, min(2.0, volatility_factor))  # Cap between 0.2x and 2x
+        else:
+            volatility_factor = 1.0
+        
+        # Apply signal strength adjustment
+        if hasattr(signal_strength, '__len__') and not isinstance(signal_strength, str):
+            signal_strength = float(signal_strength[0]) if len(signal_strength) > 0 else 0.5
+        signal_factor = 0.5 + float(signal_strength)  # 0.5 to 1.5 based on signal strength
+        
+        # Apply win streak adjustment
+        if self.win_streak_adjustment:
+            streak_factor = 1.0 + (self.win_streak * 0.1) - (self.loss_streak * 0.05)
+            streak_factor = max(0.5, min(3.0, streak_factor))  # Cap between 0.5x and 3x
+        else:
+            streak_factor = 1.0
+        
+        # Calculate final position size
+        position_size = base_position * regime_factor * trend_factor * volatility_factor * signal_factor * streak_factor
+        
+        # Apply limits
+        position_size = max(self.min_order_size, min(position_size, self.max_position_size))
+        position_size = min(position_size, self.max_order_size)
+        
+        return position_size
+    
+    def update_win_streak(self, is_win):
+        """Update win/loss streak counters"""
+        if is_win:
+            self.win_streak += 1
+            self.loss_streak = 0
+        else:
+            self.loss_streak += 1
+            self.win_streak = 0
+    
+    def update_balance(self, new_balance):
+        """Update current account balance"""
+        if self.initial_balance == 1000.0:  # If still at default
+            self.initial_balance = new_balance
+        self.current_balance = new_balance
+
 class DynamicExitSystem:
     """Advanced exit system with dynamic trailing stops and take profit levels"""
     
@@ -386,8 +553,8 @@ class TradingModel:
             
             # Support/resistance proximity
             levels = find_support_resistance(data[:i+1], lookback=50)
-            proximity_to_support = min([abs(data['close'][i] / level - 1) * 100 for level in levels['support']], default=100)
-            proximity_to_resistance = min([abs(data['close'][i] / level - 1) * 100 for level in levels['resistance']], default=100)
+            proximity_to_support = min([abs(data['close'][i] / level - 1) * 100 for level in levels[0]], default=100)
+            proximity_to_resistance = min([abs(data['close'][i] / level - 1) * 100 for level in levels[1]], default=100)
             
             # Create feature vector with feature names
             feature_row = {
@@ -671,17 +838,50 @@ class EnhancedTrading:
             return False
 
     def _preprocess_data(self, X, y=None):
-        """Preprocess training data"""
+        """Preprocess training data with feature name alignment"""
         if not self.ml_available:
             return None
             
-        # Handle categorical features if any
-        X_numeric = X.select_dtypes(include=['number'])
-        
-        # Scale the data
-        X_scaled = self.scaler.fit_transform(X_numeric) if y is not None else self.scaler.transform(X_numeric)
-        
-        return pd.DataFrame(X_scaled, index=X.index, columns=X_numeric.columns)
+        try:
+            # Handle categorical features if any
+            X_numeric = X.select_dtypes(include=['number'])
+            
+            # Get expected feature names from trained models
+            expected_features = None
+            for model_name in ['rf_model', 'xgb_model', 'lgb_model', 'dt_model']:
+                if hasattr(self, model_name) and getattr(self, model_name) is not None:
+                    model = getattr(self, model_name)
+                    if hasattr(model, 'feature_names_in_'):
+                        expected_features = model.feature_names_in_
+                        break
+            
+            # If we're training (y is provided), just scale and return
+            if y is not None:
+                X_scaled = self.scaler.fit_transform(X_numeric)
+                return pd.DataFrame(X_scaled, index=X.index, columns=X_numeric.columns)
+            
+            # For prediction, ensure feature alignment
+            if expected_features is not None and len(expected_features) > 0:
+                # Create a dataframe with the expected features
+                aligned_features = pd.DataFrame(0.0, index=[0], columns=expected_features)
+                
+                # Fill in values for features that exist in our input
+                common_features = set(X_numeric.columns).intersection(set(expected_features))
+                for feature in common_features:
+                    aligned_features[feature] = X_numeric[feature].values[0] if len(X_numeric) > 0 else 0.0
+                
+                # Scale the aligned features
+                aligned_features_scaled = self.scaler.transform(aligned_features)
+                return pd.DataFrame(aligned_features_scaled, columns=expected_features)
+            else:
+                # Fallback if no expected features found
+                X_scaled = self.scaler.transform(X_numeric)
+                return pd.DataFrame(X_scaled, index=X.index, columns=X_numeric.columns)
+                
+        except Exception as e:
+            self.logger.error(f"Error in _preprocess_data: {str(e)}")
+            # Return a default prediction dataframe as fallback
+            return None
 
     def train(self, df, lookback=20, target_column='close'):
         """Train models on historical data"""
@@ -966,102 +1166,45 @@ def detect_support_resistance(df, window=20, threshold=0.01):
             resistance_levels.append((i, highs[i]))
     
     # Cluster levels that are close to each other
-    clustered_support = cluster_price_levels(support_levels, threshold)
-    clustered_resistance = cluster_price_levels(resistance_levels, threshold)
+    clustered_support = cluster_price_levels(support_levels, threshold_pct=0.2)
+    clustered_resistance = cluster_price_levels(resistance_levels, threshold_pct=0.2)
     
     return clustered_support, clustered_resistance
 
 def cluster_price_levels(price_levels, threshold_pct=0.2):
     """Group price levels that are within threshold percentage of each other"""
-    if not price_levels:
+    if not price_levels or len(price_levels) == 0:
         return []
     
-    # Sort by price
-    sorted_levels = sorted(price_levels, key=lambda x: x[1])
-    clusters = []
-    current_cluster = [sorted_levels[0]]
+    # Extract price values if price_levels contains tuples
+    if isinstance(price_levels[0], tuple):
+        price_values = [level[1] for level in price_levels]  # Extract the price (second element)
+    else:
+        price_values = price_levels
     
-    for i in range(1, len(sorted_levels)):
-        current_price = sorted_levels[i][1]
-        prev_price = sorted_levels[i-1][1]
-        
-        price_diff_pct = abs(current_price - prev_price) / prev_price
-        
-        if price_diff_pct <= threshold_pct:
-            # Add to current cluster
-            current_cluster.append(sorted_levels[i])
-        else:
-            # Start a new cluster
-            if current_cluster:
-                avg_price = sum(level[1] for level in current_cluster) / len(current_cluster)
-                avg_idx = int(sum(level[0] for level in current_cluster) / len(current_cluster))
-                clusters.append((avg_idx, avg_price))
-                
-            current_cluster = [sorted_levels[i]]
-    
-    # Handle the last cluster
-    if current_cluster:
-        avg_price = sum(level[1] for level in current_cluster) / len(current_cluster)
-        avg_idx = int(sum(level[0] for level in current_cluster) / len(current_cluster))
-        clusters.append((avg_idx, avg_price))
-    
-    # Sort final clusters by price
-    clusters = sorted(clusters, key=lambda x: x[1])
-    
-    return clusters
-
-def find_support_resistance(data, lookback=50):
-    """Find support and resistance levels in price data"""
-    support = []
-    resistance = []
-    
-    # Use only a subset of data for efficiency
-    data_subset = data.iloc[-lookback:] if len(data) > lookback else data
-    
-    # Find local minima and maxima
-    for i in range(2, len(data_subset) - 2):
-        # Check for local minimum (support)
-        if (data_subset['low'].iloc[i] < data_subset['low'].iloc[i-1] and 
-            data_subset['low'].iloc[i] < data_subset['low'].iloc[i-2] and
-            data_subset['low'].iloc[i] < data_subset['low'].iloc[i+1] and
-            data_subset['low'].iloc[i] < data_subset['low'].iloc[i+2]):
-            support.append(data_subset['low'].iloc[i])
-            
-        # Check for local maximum (resistance)
-        if (data_subset['high'].iloc[i] > data_subset['high'].iloc[i-1] and 
-            data_subset['high'].iloc[i] > data_subset['high'].iloc[i-2] and
-            data_subset['high'].iloc[i] > data_subset['high'].iloc[i+1] and
-            data_subset['high'].iloc[i] > data_subset['high'].iloc[i+2]):
-            resistance.append(data_subset['high'].iloc[i])
-    
-    # Group close levels together
-    support = cluster_levels(support, 0.2)
-    resistance = cluster_levels(resistance, 0.2)
-    
-    return {'support': support, 'resistance': resistance}
-
-def cluster_levels(levels, threshold_pct=0.2):
-    """Group price levels that are within threshold_pct of each other"""
-    if not levels:
-        return []
+    # Convert to numpy array and ensure all elements are floats
+    price_values = np.array(price_values, dtype=float)
     
     # Sort levels
-    sorted_levels = sorted(levels)
+    sorted_levels = np.sort(price_values)
     clusters = []
-    current_cluster = [sorted_levels[0]]
+    current_cluster = [float(sorted_levels[0])]
     
-    for level in sorted_levels[1:]:
-        # If level is within threshold of the current cluster average
-        if abs(level / np.mean(current_cluster) - 1) * 100 < threshold_pct:
+    for i in range(1, len(sorted_levels)):
+        level = float(sorted_levels[i])
+        cluster_mean = float(np.mean(current_cluster))
+        
+        # Check if level is within threshold of the current cluster average
+        if abs((level / cluster_mean) - 1.0) * 100.0 < threshold_pct:
             current_cluster.append(level)
         else:
             # Add current cluster average to clusters and start a new cluster
-            clusters.append(np.mean(current_cluster))
+            clusters.append(float(np.mean(current_cluster)))
             current_cluster = [level]
             
     # Add the last cluster
     if current_cluster:
-        clusters.append(np.mean(current_cluster))
+        clusters.append(float(np.mean(current_cluster)))
     
     return clusters
 
@@ -1101,8 +1244,8 @@ def prepare_features(data, bar_index):
     
     # Support/resistance proximity
     levels = find_support_resistance(data[:i+1], lookback=50)
-    proximity_to_support = min([abs(data['close'][i] / level - 1) * 100 for level in levels['support']], default=100)
-    proximity_to_resistance = min([abs(data['close'][i] / level - 1) * 100 for level in levels['resistance']], default=100)
+    proximity_to_support = min([abs(data['close'][i] / level - 1) * 100 for level in levels[0]], default=100)
+    proximity_to_resistance = min([abs(data['close'][i] / level - 1) * 100 for level in levels[1]], default=100)
     
     # Create feature vector
     return [
@@ -1156,10 +1299,10 @@ def run_ultra_maximized(symbol="BTCUSDT", timeframe="M5", backtest_days=30, init
         tick_size = 0.1
         stop_level = 100
         min_order_size = 0.01
-        max_order_size = 100.0
+        max_order_size = 1000.0
         
         # Safety parameters for live trading (if applicable)
-        mt5_max_order_size = 10.0  # Cap position size for MetaTrader
+        mt5_max_order_size = 10000.0  # Cap position size for MetaTrader
         
         logger.info("Using ultra-aggressive parameters:")
         logger.info(f"RSI thresholds: {rsi_buy_threshold}/{rsi_sell_threshold}")
@@ -1191,6 +1334,7 @@ def run_ultra_maximized(symbol="BTCUSDT", timeframe="M5", backtest_days=30, init
         }.get(timeframe, 5)
         
         # Generate synthetic data for testing
+        from run_ultra_maximized import generate_synthetic_data, add_indicators, MultipleTimeframeAnalysis, MarketRegimeDetector, EnhancedTrading, UltraMaximizedStrategy, resample_data
         df = generate_synthetic_data(symbol, start_date, end_date, timeframe_minutes)
         
         # Add indicators
@@ -1271,152 +1415,84 @@ def run_ultra_maximized(symbol="BTCUSDT", timeframe="M5", backtest_days=30, init
         return None
 
 def print_performance_summary(results):
-    """
-    Print a detailed performance summary in a format similar to StrategyTracker.py
-    
-    Args:
-        results: Dictionary containing backtest results
-    """
-    # Extract results
-    initial_balance = results['initial_balance']
-    final_balance = results['final_balance']
-    total_return = results['total_return_pct']
-    total_trades = results['total_trades']
-    win_rate = results['win_rate']
-    profit_factor = results['profit_factor']
-    avg_profit_per_trade = results['avg_profit_per_trade']
-    max_drawdown = results['max_drawdown_pct']
+    """Print detailed performance metrics"""
+    if not results or 'closed_trades' not in results:
+        print("No results or closed trades available.")
+        return
+        
     closed_trades = results['closed_trades']
-    
-    # Calculate additional metrics
-    pnl = final_balance - initial_balance
+    if not closed_trades:
+        print("No closed trades available.")
+        return
+        
+    # Add profit_pct if missing
+    for trade in closed_trades:
+        if 'profit_pct' not in trade and 'profit' in trade:
+            trade['profit_pct'] = trade['profit']
     
     # Calculate win/loss statistics
-    win_trades = [t for t in closed_trades if t['profit_loss'] > 0]
-    loss_trades = [t for t in closed_trades if t['profit_loss'] <= 0]
+    win_trades = [t for t in closed_trades if t.get('profit_pct', t.get('profit', 0)) > 0]
+    loss_trades = [t for t in closed_trades if t.get('profit_pct', t.get('profit', 0)) <= 0]
     
     win_count = len(win_trades)
     loss_count = len(loss_trades)
+    total_trades = win_count + loss_count
     
-    avg_win_pct = sum(t['profit_pct'] for t in win_trades) / win_count if win_count > 0 else 0
-    avg_loss_pct = sum(t['profit_pct'] for t in loss_trades) / loss_count if loss_count > 0 else 0
+    if total_trades == 0:
+        print("No trades executed.")
+        return
     
-    largest_win_pct = max([t['profit_pct'] for t in win_trades]) if win_trades else 0
-    largest_loss_pct = min([t['profit_pct'] for t in loss_trades]) if loss_trades else 0
+    win_rate = win_count / total_trades * 100 if total_trades > 0 else 0
     
-    # Calculate Sharpe ratio (simplified)
-    if closed_trades:
-        returns = [t['profit_pct'] for t in closed_trades]
-        returns_array = np.array(returns)
-        sharpe_ratio = returns_array.mean() / returns_array.std() * np.sqrt(252) if returns_array.std() > 0 else 0
-    else:
-        sharpe_ratio = 0
+    # Calculate profit statistics
+    avg_win_pct = sum(t.get('profit_pct', t.get('profit', 0)) for t in win_trades) / win_count if win_count > 0 else 0
+    avg_loss_pct = sum(t.get('profit_pct', t.get('profit', 0)) for t in loss_trades) / loss_count if loss_count > 0 else 0
     
-    # Calculate trade direction statistics
-    buy_trades = len([t for t in closed_trades if t['direction'] == 'BUY'])
-    sell_trades = len([t for t in closed_trades if t['direction'] == 'SELL'])
+    largest_win_pct = max([t.get('profit_pct', t.get('profit', 0)) for t in win_trades]) if win_trades else 0
+    largest_loss_pct = min([t.get('profit_pct', t.get('profit', 0)) for t in loss_trades]) if loss_trades else 0
     
-    # Calculate exit reason statistics
-    exit_reasons = {}
-    for trade in closed_trades:
-        reason = trade.get('exit_reason', 'unknown')
-        exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+    # Calculate overall performance
+    total_profit_pct = sum(t.get('profit_pct', t.get('profit', 0)) for t in closed_trades)
+    avg_profit_pct = total_profit_pct / total_trades if total_trades > 0 else 0
     
-    # Calculate trade duration statistics
-    durations = []
-    for trade in closed_trades:
-        if 'entry_time' in trade and 'exit_time' in trade:
-            entry_time = trade['entry_time']
-            exit_time = trade['exit_time']
-            if isinstance(entry_time, str):
-                entry_time = datetime.strptime(entry_time, '%Y-%m-%d %H:%M:%S')
-            if isinstance(exit_time, str):
-                exit_time = datetime.strptime(exit_time, '%Y-%m-%d %H:%M:%S')
-            duration = (exit_time - entry_time).total_seconds() / 60  # in minutes
-            durations.append(duration)
+    # Calculate profit factor
+    gross_profit = sum(t.get('profit_pct', t.get('profit', 0)) for t in win_trades)
+    gross_loss = abs(sum(t.get('profit_pct', t.get('profit', 0)) for t in loss_trades))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
     
-    avg_duration = sum(durations) / len(durations) if durations else 0
+    # Calculate expectancy
+    expectancy = (win_rate / 100 * avg_win_pct) + ((1 - win_rate / 100) * avg_loss_pct)
     
-    # Print summary
-    print("\n" + "=" * 80)
-    print(" " * 25 + "ULTRA-MAXIMIZED STRATEGY PERFORMANCE SUMMARY")
-    print("=" * 80)
+    # Print performance summary
+    print("\n===== PERFORMANCE SUMMARY =====")
+    print(f"Total trades: {total_trades}")
+    print(f"Win rate: {win_rate:.2f}%")
+    print(f"Profit factor: {profit_factor:.2f}")
+    print(f"Expectancy: {expectancy:.2f}%")
+    print(f"Average profit per trade: {avg_profit_pct:.2f}%")
+    print(f"Average win: {avg_win_pct:.2f}%")
+    print(f"Average loss: {avg_loss_pct:.2f}%")
+    print(f"Largest win: {largest_win_pct:.2f}%")
+    print(f"Largest loss: {largest_loss_pct:.2f}%")
+    print(f"Total return: {total_profit_pct:.2f}%")
     
-    print("\n[ACCOUNT PERFORMANCE]")
-    print(f"Initial Balance:     ${initial_balance:,.2f}")
-    print(f"Final Balance:       ${final_balance:,.2f}")
-    print(f"Profit/Loss:         ${pnl:,.2f}")
-    print(f"Total Return:        {total_return:.2f}%")
-    print(f"Maximum Drawdown:    {max_drawdown:.2f}%")
-    print(f"Sharpe Ratio:        {sharpe_ratio:.2f}")
+    # Print additional metrics if available
+    if 'sharpe_ratio' in results:
+        print(f"Sharpe ratio: {results['sharpe_ratio']:.2f}")
+    if 'max_drawdown' in results:
+        print(f"Max drawdown: {results['max_drawdown']:.2f}%")
+    if 'recovery_factor' in results:
+        print(f"Recovery factor: {results['recovery_factor']:.2f}")
+    if 'final_balance' in results:
+        print(f"Final balance: ${results['final_balance']:,.2f}")
     
-    print("\n[TRADE STATISTICS]")
-    print(f"Total Trades:        {total_trades}")
-    print(f"Win Rate:            {win_rate:.2f}%")
-    print(f"Profit Factor:       {profit_factor:.2f}")
-    print(f"Avg Profit/Trade:    ${avg_profit_per_trade:.2f}")
-    print(f"Buy Trades:          {buy_trades} ({buy_trades/total_trades*100:.1f}%)")
-    print(f"Sell Trades:         {sell_trades} ({sell_trades/total_trades*100:.1f}%)")
-    
-    print("\n[PROFIT/LOSS METRICS]")
-    print(f"Avg Win:             {avg_win_pct:.2f}%")
-    print(f"Avg Loss:            {avg_loss_pct:.2f}%")
-    print(f"Largest Win:         {largest_win_pct:.2f}%")
-    print(f"Largest Loss:        {largest_loss_pct:.2f}%")
-    print(f"Avg Trade Duration:  {avg_duration:.1f} minutes")
-    
-    print("\n[EXIT REASONS]")
-    for reason, count in exit_reasons.items():
-        print(f"{reason.replace('_', ' ').title():18}: {count} ({count/total_trades*100:.1f}%)")
-    
-    # Compare with backtest expectations
-    print("\n[COMPARISON TO BACKTEST EXPECTATIONS]")
-    print(f"Expected Win Rate:   100.00%    Actual: {win_rate:.2f}%")
-    print(f"Expected Avg Return: 157.92%    Actual: {(total_return/total_trades if total_trades > 0 else 0):.2f}%")
-    
-    print("\n[RECOMMENDATIONS]")
-    if win_rate < 0.5:
-        print("- Consider adjusting entry parameters to improve win rate")
-    if profit_factor < 1.0:
-        print("- Adjust risk management to improve profit factor (aim for >1.5)")
-    if max_drawdown > 0.3:
-        print("- Reduce position sizing to limit maximum drawdown")
-    if buy_trades == 0 or sell_trades == 0:
-        print("- Strategy is unbalanced - ensure both buy and sell signals are generated")
-    
-    print("=" * 80)
-    
-    return results
+    print("==============================\n")
 
-if __name__ == "__main__":
-    import argparse
-    
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Run Ultra-Maximized Strategy")
-    parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Symbol to trade")
-    parser.add_argument("--timeframe", type=str, default="M5", help="Timeframe for backtesting")
-    parser.add_argument("--initial-balance", type=float, default=200000, help="Initial balance")
-    parser.add_argument("--days", type=int, default=30, help="Days to backtest")
-    parser.add_argument("--live", action="store_true", help="Run in live trading mode with MetaTrader constraints")
-    
-    args = parser.parse_args()
-    
-    # Run with command line arguments
-    run_ultra_maximized(
-        symbol=args.symbol,
-        timeframe=args.timeframe,
-        backtest_days=args.days,
-        initial_balance=args.initial_balance
-    )
-
-class AdvancedPositionSizing:
-    """Advanced position sizing system that dynamically adjusts position sizes 
-    based on various market conditions, win rates, and account metrics"""
-    
     def __init__(self, max_position_size=100.0, initial_risk_per_trade=0.02, 
                  max_risk_per_trade=0.05, max_open_risk=0.25, 
                  volatility_adjustment=True, win_streak_adjustment=True,
-                 trend_adjustment=True, account_growth_adjustment=True):
+                 trend_adjustment=True, account_growth_adjustment=True,
+                 min_order_size=0.01, max_order_size = 1000.0):
         
         self.max_position_size = max_position_size  # Maximum position size for safety
         self.initial_risk_per_trade = initial_risk_per_trade  # Initial risk per trade (2%)
@@ -1443,8 +1519,8 @@ class AdvancedPositionSizing:
         self.total_open_risk = 0.0
         
         # MT5 exchange limits for BTCUSDT
-        self.min_order_size = 0.01
-        self.max_order_size = 100.0
+        self.min_order_size = min_order_size
+        self.max_order_size = max_order_size
         
         # Logger setup
         self.logger = logging.getLogger(__name__)
@@ -1475,6 +1551,7 @@ class AdvancedPositionSizing:
         # Update profit factor
         gross_profit = sum(trade['pnl'] for trade in self.trades_history if trade['pnl'] > 0)
         gross_loss = abs(sum(trade['pnl'] for trade in self.trades_history if trade['pnl'] < 0))
+        
         self.profit_factor = gross_profit / gross_loss if gross_loss > 0 else 1.0
         
         # Update win/loss streaks
@@ -1631,7 +1708,7 @@ class AdvancedPositionSizing:
         
         # 4. For live trading, apply special cap from memory settings
         if hasattr(self, 'live_trading') and self.live_trading:
-            position_size = min(position_size, 10.0)  # Hard cap for live trading
+            position_size = min(position_size, 100.0)  # Hard cap for live trading
             
         # Ensure position size is within exchange limits
         position_size = max(self.min_order_size, min(position_size, self.max_order_size))
@@ -1657,7 +1734,7 @@ class AdvancedPositionSizing:
         
         # Apply special safety limits for live trading
         if is_live:
-            self.max_position_size = min(self.max_position_size, 10.0)  # Reduce max position size
+            self.max_position_size = min(self.max_position_size, 100.0)  # Reduce max position size
             self.max_risk_per_trade = min(self.max_risk_per_trade, 0.02)  # Max 2% risk per trade
             self.max_open_risk = min(self.max_open_risk, 0.10)  # Max 10% open risk
 
@@ -1701,15 +1778,23 @@ class MultipleTimeframeAnalysis:
         # Last update time for each timeframe
         self.last_update = {}
         
+        # Try to import MetaTrader5
+        try:
+            import MetaTrader5 as mt5
+            self.mt5_available = True
+        except ImportError:
+            mt5 = None
+            self.mt5_available = False
+        
         # MT5 timeframe mapping
         self.mt5_timeframes = {
-            1: mt5.TIMEFRAME_M1 if mt5 else 1,
-            5: mt5.TIMEFRAME_M5 if mt5 else 5,
-            15: mt5.TIMEFRAME_M15 if mt5 else 15,
-            30: mt5.TIMEFRAME_M30 if mt5 else 30,
-            60: mt5.TIMEFRAME_H1 if mt5 else 60,
-            240: mt5.TIMEFRAME_H4 if mt5 else 240,
-            1440: mt5.TIMEFRAME_D1 if mt5 else 1440
+            1: mt5.TIMEFRAME_M1 if self.mt5_available else 1,
+            5: mt5.TIMEFRAME_M5 if self.mt5_available else 5,
+            15: mt5.TIMEFRAME_M15 if self.mt5_available else 15,
+            30: mt5.TIMEFRAME_M30 if self.mt5_available else 30,
+            60: mt5.TIMEFRAME_H1 if self.mt5_available else 60,
+            240: mt5.TIMEFRAME_H4 if self.mt5_available else 240,
+            1440: mt5.TIMEFRAME_D1 if self.mt5_available else 1440
         }
         
         # Logger setup
@@ -1783,7 +1868,7 @@ class MultipleTimeframeAnalysis:
         # Generate random price movements (more volatility for lower timeframes)
         volatility = 0.001 * (60 / timeframe) ** 0.5  # Higher volatility for lower timeframes
         
-        # Start with a base price
+        # Start with a realistic BTC price (around $75,000)
         base_price = 50000  # Starting price (e.g., for BTC)
         
         # Create arrays for synthetic data
@@ -1835,61 +1920,65 @@ class MultipleTimeframeAnalysis:
             
         df = self.data[timeframe].copy()
         
-        # Calculate RSI
-        if 'close' in df.columns:
-            if talib:
-                df['rsi'] = talib.RSI(df['close'].values, timeperiod=14)
-            else:
-                # Calculate RSI using pandas
-                delta = df['close'].diff()
-                gain = delta.where(delta > 0, 0)
-                loss = -delta.where(delta < 0, 0)
-                
-                avg_gain = gain.rolling(window=14).mean()
-                avg_loss = loss.rolling(window=14).mean()
-                
-                rs = avg_gain / avg_loss
-                df['rsi'] = 100 - (100 / (1 + rs))
-                
+        # Try to import TA-Lib
+        try:
+            import talib
+            talib_available = True
+        except ImportError:
+            talib_available = False
+            
+        # Calculate indicators
+        # RSI
+        if talib_available:
+            df['rsi'] = talib.RSI(df['close'], timeperiod=14)
+        else:
+            # Calculate RSI manually
+            delta = df['close'].diff()
+            gain = delta.where(delta > 0, 0)
+            loss = -delta.where(delta < 0, 0)
+            
+            avg_gain = gain.rolling(window=14).mean()
+            avg_loss = loss.rolling(window=14).mean()
+            
+            rs = avg_gain / avg_loss
+            df['rsi'] = 100 - (100 / (1 + rs))
+            
         # Calculate MACD
-        if 'close' in df.columns:
-            if talib:
-                df['macd'], df['macd_signal'], df['macd_hist'] = talib.MACD(
-                    df['close'].values, fastperiod=12, slowperiod=26, signalperiod=9
-                )
-            else:
-                # Calculate MACD using pandas
-                ema12 = df['close'].ewm(span=12, adjust=False).mean()
-                ema26 = df['close'].ewm(span=26, adjust=False).mean()
-                df['macd'] = ema12 - ema26
-                df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-                df['macd_hist'] = df['macd'] - df['macd_signal']
-                
+        if talib_available:
+            df['macd'], df['macd_signal'], df['macd_hist'] = talib.MACD(
+                df['close'], fastperiod=12, slowperiod=26, signalperiod=9
+            )
+        else:
+            # Calculate MACD manually
+            ema12 = df['close'].ewm(span=12, adjust=False).mean()
+            ema26 = df['close'].ewm(span=26, adjust=False).mean()
+            df['macd'] = ema12 - ema26
+            df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+            df['macd_hist'] = df['macd'] - df['macd_signal']
+            
         # Calculate Bollinger Bands
-        if 'close' in df.columns:
-            if talib:
-                df['bb_upper'], df['bb_middle'], df['bb_lower'] = talib.BBANDS(
-                    df['close'].values, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
-                )
-            else:
-                # Calculate Bollinger Bands using pandas
-                df['bb_middle'] = df['close'].rolling(window=20).mean()
-                df['bb_std'] = df['close'].rolling(window=20).std()
-                df['bb_upper'] = df['bb_middle'] + (df['bb_std'] * 2)
-                df['bb_lower'] = df['bb_middle'] - (df['bb_std'] * 2)
-                
+        if talib_available:
+            df['bb_upper'], df['bb_middle'], df['bb_lower'] = talib.BBANDS(
+                df['close'], timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+            )
+        else:
+            # Calculate Bollinger Bands manually
+            df['bb_middle'] = df['close'].rolling(window=20).mean()
+            df['bb_std'] = df['close'].rolling(window=20).std()
+            df['bb_upper'] = df['bb_middle'] + (df['bb_std'] * 2)
+            df['bb_lower'] = df['bb_middle'] - (df['bb_std'] * 2)
+            
         # Calculate ATR for volatility
-        if all(col in df.columns for col in ['high', 'low', 'close']):
-            if talib:
-                df['atr'] = talib.ATR(df['high'].values, df['low'].values, df['close'].values, timeperiod=14)
-            else:
-                # Calculate ATR using pandas
-                tr1 = df['high'] - df['low']
-                tr2 = abs(df['high'] - df['close'].shift())
-                tr3 = abs(df['low'] - df['close'].shift())
-                tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-                df['atr'] = tr.rolling(window=14).mean()
-                
+        if talib_available:
+            df['atr'] = talib.ATR(df['high'], df['low'], df['close'], timeperiod=14)
+        else:
+            # Calculate ATR manually
+            tr1 = df['high'] - df['low']
+            tr2 = abs(df['high'] - df['close'].shift())
+            tr3 = abs(df['low'] - df['close'].shift())
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            df['atr'] = tr.rolling(window=14).mean()
+            
         # Calculate trend strength
         df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
         df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
@@ -1977,8 +2066,6 @@ class MultipleTimeframeAnalysis:
                 bb_signal = -position  # Reverse for trading signal (near upper band = sell)
             else:
                 bb_signal = 0.0
-        else:
-            bb_signal = 0.0
             
         # 4. Trend signal (-1.0 to 1.0)
         if 'trend' in recent_bars.columns:
@@ -2245,20 +2332,20 @@ class MultipleTimeframeAnalysis:
             weight = self.weighting_scheme.get(tf, 0.0) * 2.0  # Double the importance
             
             # Add levels with timeframe information
-            for idx, level in support:
+            for level in support:
                 support_levels.append({
                     'price': level,
                     'timeframe': tf,
                     'weight': weight,
-                    'age': len(df) - idx  # How many bars ago
+                    'age': 0  # We don't have index information anymore
                 })
                 
-            for idx, level in resistance:
+            for level in resistance:
                 resistance_levels.append({
                     'price': level,
                     'timeframe': tf,
                     'weight': weight,
-                    'age': len(df) - idx  # How many bars ago
+                    'age': 0  # We don't have index information anymore
                 })
                 
         # Cluster nearby levels
@@ -2281,15 +2368,15 @@ class MultipleTimeframeAnalysis:
         clusters = []
         current_cluster = [sorted_levels[0]]
         
-        for i in range(1, len(sorted_levels)):
-            current_price = sorted_levels[i]['price']
-            prev_price = sorted_levels[i-1]['price']
+        for level in sorted_levels[1:]:
+            current_price = level['price']
+            prev_price = sorted_levels[sorted_levels.index(level) - 1]['price']
             
             price_diff_pct = abs(current_price - prev_price) / prev_price
             
             if price_diff_pct <= threshold_pct:
                 # Add to current cluster
-                current_cluster.append(sorted_levels[i])
+                current_cluster.append(level)
             else:
                 # Start a new cluster
                 if current_cluster:
@@ -2310,7 +2397,7 @@ class MultipleTimeframeAnalysis:
                         'confidence': confidence
                     })
                     
-                current_cluster = [sorted_levels[i]]
+                current_cluster = [level]
         
         # Add the last cluster
         if current_cluster:
@@ -2336,7 +2423,7 @@ class UltraMaximizedStrategy:
                  take_profit_levels=None, position_size_multiplier=8000.0, max_concurrent_trades=30,
                  trading_model=None, enhanced_trading=None, market_regime_detector=None,
                  position_sizing=None, support_resistance=None, mtf_analysis=None,
-                 mt5_max_order_size=10.0):
+                 mt5_max_order_size = 10000.0):
         self.symbol = symbol
         self.timeframe = timeframe
         self.ultra_aggressive = ultra_aggressive
@@ -2355,7 +2442,7 @@ class UltraMaximizedStrategy:
         self.stop_level = 100  # Minimum stop level in points
         self.starting_leverage = 200
         self.min_order_size = 0.01
-        self.max_order_size = 100.0
+        self.max_order_size = 1000.0
         
         # Import MetaTrader5 if available
         try:
@@ -2372,6 +2459,13 @@ class UltraMaximizedStrategy:
         self.market_regime_detector = market_regime_detector or MarketRegimeDetector(lookback_period=50)
         self.position_sizing = position_sizing or AdvancedPositionSizing(
             max_position_size=position_size_multiplier,
+            initial_risk_per_trade=0.02,
+            max_risk_per_trade=0.05,
+            max_open_risk=0.25,
+            volatility_adjustment=True,
+            win_streak_adjustment=True,
+            trend_adjustment=True,
+            account_growth_adjustment=True,
             min_order_size=self.min_order_size,
             max_order_size=self.max_order_size
         )
@@ -2420,10 +2514,15 @@ class UltraMaximizedStrategy:
         for i in range(100, len(df)):
             current_time = df.index[i]
             current_price = df['close'].iloc[i]
+            
+            # Convert current_time to datetime if it's not already
+            if isinstance(current_time, (int, float)):
+                current_time = pd.to_datetime(current_time, unit='s')
+                
             day_str = current_time.strftime('%Y-%m-%d')
             
             # Update support and resistance levels
-            self.support_resistance.update_from_price_action(df.iloc[:i+1])
+            self.support_resistance.update_levels(df.iloc[:i+1])
             
             # Check for closed positions first
             for pos_idx in reversed(range(len(open_positions))):
@@ -2444,6 +2543,9 @@ class UltraMaximizedStrategy:
                     position['profit_loss'] = position['position_size'] * (position['exit_price'] / position['entry_price'] - 1) \
                                              if position['type'] == 'buy' else \
                                              position['position_size'] * (1 - position['exit_price'] / position['entry_price'])
+                    position['profit_pct'] = (position['exit_price'] / position['entry_price'] - 1) * 100 \
+                                            if position['type'] == 'buy' else \
+                                            (1 - position['exit_price'] / position['entry_price']) * 100
                     position['status'] = 'closed'
                     position['exit_reason'] = 'Stop Loss'
                     
@@ -2475,6 +2577,9 @@ class UltraMaximizedStrategy:
                         position['profit_loss'] = position['position_size'] * (position['exit_price'] / position['entry_price'] - 1) \
                                                  if position['type'] == 'buy' else \
                                                  position['position_size'] * (1 - position['exit_price'] / position['entry_price'])
+                        position['profit_pct'] = (position['exit_price'] / position['entry_price'] - 1) * 100 \
+                                                if position['type'] == 'buy' else \
+                                                (1 - position['exit_price'] / position['entry_price']) * 100
                         position['status'] = 'closed'
                         position['exit_reason'] = 'Take Profit'
                         
@@ -2607,6 +2712,9 @@ class UltraMaximizedStrategy:
             position['profit_loss'] = position['position_size'] * (position['exit_price'] / position['entry_price'] - 1) \
                                      if position['type'] == 'buy' else \
                                      position['position_size'] * (1 - position['exit_price'] / position['entry_price'])
+            position['profit_pct'] = (position['exit_price'] / position['entry_price'] - 1) * 100 \
+                                    if position['type'] == 'buy' else \
+                                    (1 - position['exit_price'] / position['entry_price']) * 100
             position['status'] = 'closed'
             position['exit_reason'] = 'End of Backtest'
             
@@ -2653,7 +2761,7 @@ class UltraMaximizedStrategy:
             largest_loss_pct = 0
             
         # Calculate average trade duration
-        trade_durations = [(trade['exit_time'] - trade['entry_time']).total_seconds() / 60 for trade in closed_trades]
+        trade_durations = [(pd.Timestamp(trade['exit_time']) - pd.Timestamp(trade['entry_time'])).total_seconds() / 60 for trade in closed_trades]
         avg_trade_duration = sum(trade_durations) / len(trade_durations) if trade_durations else 0
         
         # Count exit reasons
@@ -2697,7 +2805,8 @@ class UltraMaximizedStrategy:
             'largest_loss_pct': largest_loss_pct,
             'avg_trade_duration': avg_trade_duration,
             'exit_reasons': exit_reasons,
-            'sharpe_ratio': sharpe_ratio
+            'sharpe_ratio': sharpe_ratio,
+            'closed_trades': closed_trades
         }
 
     def execute_trade(self, df, i, signal_type, entry_price, stop_loss_pct, take_profit_levels, position_size):
@@ -2759,11 +2868,13 @@ class UltraMaximizedStrategy:
                 closest_distance = float('inf')
                 
                 for support in supports:
-                    if support < entry_price:
-                        distance = entry_price - support
+                    # Extract the price from the support dictionary
+                    support_price = support['price']
+                    if support_price < entry_price:
+                        distance = entry_price - support_price
                         if distance < closest_distance:
                             closest_distance = distance
-                            closest_support = support
+                            closest_support = support_price
                 
                 # Only adjust if the support level is higher than the calculated stop loss
                 if closest_support and closest_support > stop_loss_price:
@@ -2774,18 +2885,20 @@ class UltraMaximizedStrategy:
                     min_stop_distance = self.stop_level * self.tick_value
                     if entry_price - adjusted_stop >= min_stop_distance:
                         stop_loss_price = adjusted_stop
-            else:
+            else:  # sell trade
                 # For sell trades, find the closest resistance level above entry price
                 resistances = support_resistance_levels.get('resistance', [])
                 closest_resistance = None
                 closest_distance = float('inf')
                 
                 for resistance in resistances:
-                    if resistance > entry_price:
-                        distance = resistance - entry_price
+                    # Extract the price from the resistance dictionary
+                    resistance_price = resistance['price']
+                    if resistance_price > entry_price:
+                        distance = resistance_price - entry_price
                         if distance < closest_distance:
                             closest_distance = distance
-                            closest_resistance = resistance
+                            closest_resistance = resistance_price
                 
                 # Only adjust if the resistance level is lower than the calculated stop loss
                 if closest_resistance and closest_resistance < stop_loss_price:
@@ -2807,16 +2920,16 @@ class UltraMaximizedStrategy:
                 
                 # Add resistance levels that are above entry price as potential take profit targets
                 for resistance in resistances:
-                    if resistance > entry_price:
-                        adjusted_take_profits.append(resistance)
-            else:
+                    if resistance['price'] > entry_price:
+                        adjusted_take_profits.append(resistance['price'])
+            else:  # sell trade
                 # For sell trades, use support levels as additional take profit targets
                 supports = support_resistance_levels.get('support', [])
                 
                 # Add support levels that are below entry price as potential take profit targets
                 for support in supports:
-                    if support < entry_price:
-                        adjusted_take_profits.append(support)
+                    if support['price'] < entry_price:
+                        adjusted_take_profits.append(support['price'])
             
             # Combine original take profit levels with support/resistance levels
             take_profit_prices.extend(adjusted_take_profits)
@@ -2868,7 +2981,7 @@ def generate_synthetic_data(symbol, start_date, end_date, timeframe_minutes):
     np.random.seed(42)
     
     # Start with a realistic BTC price (around $75,000)
-    start_price = 75000.0
+    start_price = 50000  # Starting price (e.g., for BTC)
     
     # Create arrays for synthetic data
     times = []
@@ -2879,47 +2992,30 @@ def generate_synthetic_data(symbol, start_date, end_date, timeframe_minutes):
     volumes = []
     
     current_price = start_price
-    current_time = start_date
-    
-    # Generate realistic price movements with trends, volatility clusters
-    trend = 0
-    volatility = 0.002  # Base volatility
-    volume_base = 100
-    
     for i in range(num_bars):
-        # Occasionally change trend direction (10% chance)
-        if random.random() < 0.1:
-            trend = random.uniform(-0.0003, 0.0003)
+        # Random walk with slight upward bias
+        close_change = np.random.normal(0.0001, 0.002)
+        new_close = current_price * (1 + close_change)
+        closes.append(new_close)
         
-        # Occasionally change volatility (5% chance)
-        if random.random() < 0.05:
-            volatility = random.uniform(0.001, 0.004)
+        # Generate open, high, low based on close
+        opens.append(closes[-1])
         
-        # Generate price movement for this bar
-        price_change = trend + random.normalvariate(0, volatility)
-        price_change_pct = price_change * current_price
+        high_range = opens[-1] * (1 + np.random.uniform(0, 0.004))
+        low_range = opens[-1] * (1 - np.random.uniform(0, 0.004))
         
-        # Calculate OHLC values
-        open_price = current_price
-        close_price = current_price + price_change_pct
-        high_price = max(open_price, close_price) * (1 + random.uniform(0, volatility * 2))
-        low_price = min(open_price, close_price) * (1 - random.uniform(0, volatility * 2))
+        highs.append(max(opens[-1], closes[-1], high_range))
+        lows.append(min(opens[-1], closes[-1], low_range))
         
-        # Generate correlated volume (higher for bigger price movements)
-        vol_factor = 1 + 5 * abs(price_change)
-        volume = volume_base * vol_factor * random.uniform(0.7, 1.3)
-        
-        # Store values
-        times.append(current_time)
-        opens.append(open_price)
-        highs.append(high_price)
-        lows.append(low_price)
-        closes.append(close_price)
-        volumes.append(volume)
+        # Generate random volume (higher for higher timeframes)
+        volume_base = 100 * timeframe_minutes
+        volumes.append(max(1, int(np.random.gamma(2, volume_base))))
         
         # Update for next bar
-        current_price = close_price
-        current_time += timedelta(minutes=timeframe_minutes)
+        current_price = closes[-1]
+        
+        # Create time index
+        times.append(start_date + timedelta(minutes=timeframe_minutes * i))
     
     # Create DataFrame
     df = pd.DataFrame({
@@ -3007,7 +3103,7 @@ def add_indicators(df):
     for i in range(window, len(df)):
         x = np.array(range(window))
         y = df['close'].values[i-window:i]
-        slope, _, _, _, _ = linregress(x, y)
+        slope, _, r_value, _, _ = linregress(x, y)
         df.loc[df.index[i], 'trend_strength'] = slope / df['close'].values[i-1] * 100
     
     # Calculate volume moving average
@@ -3017,3 +3113,783 @@ def add_indicators(df):
     df = df.dropna().reset_index(drop=False)
     
     return df
+
+def cluster_price_levels(price_levels, threshold_pct=0.2):
+    """Group price levels that are within threshold percentage of each other"""
+    if not price_levels or len(price_levels) == 0:
+        return []
+    
+    # Extract price values if price_levels contains tuples
+    if isinstance(price_levels[0], tuple):
+        price_values = [level[1] for level in price_levels]  # Extract the price (second element)
+    else:
+        price_values = price_levels
+    
+    # Convert to numpy array and ensure all elements are floats
+    price_values = np.array(price_values, dtype=float)
+    
+    # Sort levels
+    sorted_levels = np.sort(price_values)
+    clusters = []
+    current_cluster = [float(sorted_levels[0])]
+    
+    for i in range(1, len(sorted_levels)):
+        level = float(sorted_levels[i])
+        cluster_mean = float(np.mean(current_cluster))
+        
+        # Check if level is within threshold of the current cluster average
+        if abs((level / cluster_mean) - 1.0) * 100.0 < threshold_pct:
+            current_cluster.append(level)
+        else:
+            # Add current cluster average to clusters and start a new cluster
+            clusters.append(float(np.mean(current_cluster)))
+            current_cluster = [level]
+            
+    # Add the last cluster
+    if current_cluster:
+        clusters.append(float(np.mean(current_cluster)))
+    
+    return clusters
+
+def find_support_resistance(df, window=50):
+    """Find support and resistance levels in price data"""
+    support = []
+    resistance = []
+    
+    # Use only a subset of data for efficiency
+    data_subset = df.iloc[-window:] if len(df) > window else df
+    
+    # Find local minima and maxima
+    for i in range(1, len(data_subset) - 1):
+        # Support: local minimum
+        if data_subset['low'].iloc[i] < data_subset['low'].iloc[i-1] and data_subset['low'].iloc[i] < data_subset['low'].iloc[i+1]:
+            support.append(data_subset['low'].iloc[i])
+        
+        # Resistance: local maximum
+        if data_subset['high'].iloc[i] > data_subset['high'].iloc[i-1] and data_subset['high'].iloc[i] > data_subset['high'].iloc[i+1]:
+            resistance.append(data_subset['high'].iloc[i])
+    
+    # Cluster similar levels
+    support = cluster_price_levels(support)
+    resistance = cluster_price_levels(resistance)
+    
+    return support, resistance
+
+class SupportResistanceEnhancement:
+    """
+    Class to enhance trading decisions based on support and resistance levels
+    """
+    def __init__(self, price_threshold_pct=0.5, confidence_threshold=0.7):
+        self.price_threshold_pct = price_threshold_pct
+        self.confidence_threshold = confidence_threshold
+        self.support_levels = []
+        self.resistance_levels = []
+        self.support_confidence = {}
+        self.resistance_confidence = {}
+        
+    def update_levels(self, df):
+        """
+        Update support and resistance levels based on price data
+        
+        Args:
+            df: DataFrame with OHLCV data
+        """
+        levels = find_support_resistance(df, window=50)
+        
+        # Update support levels
+        self.support_levels = levels[0]  # First element of tuple is support
+        
+        # Update resistance levels
+        self.resistance_levels = levels[1]  # Second element of tuple is resistance
+        
+    def get_nearest_support(self, price):
+        """
+        Get the nearest support level below the current price
+        
+        Args:
+            price: Current price
+            
+        Returns:
+            float: Nearest support level or None if not found
+        """
+        if not self.support_levels:
+            return None
+            
+        # Filter supports below price
+        supports_below = [s for s in self.support_levels if s < price]
+        
+        if not supports_below:
+            return None
+            
+        # Return the highest support below price
+        return max(supports_below)
+        
+    def get_nearest_resistance(self, price):
+        """
+        Get the nearest resistance level above the current price
+        
+        Args:
+            price: Current price
+            
+        Returns:
+            float: Nearest resistance level or None if not found
+        """
+        if not self.resistance_levels:
+            return None
+            
+        # Filter resistances above price
+        resistances_above = [r for r in self.resistance_levels if r > price]
+        
+        if not resistances_above:
+            return None
+            
+        # Return the lowest resistance above price
+        return min(resistances_above)
+        
+    def adjust_stop_loss(self, entry_price, initial_stop, direction):
+        """
+        Adjust stop loss based on support/resistance levels
+        
+        Args:
+            entry_price: Entry price
+            initial_stop: Initial stop loss price
+            direction: 'buy' or 'sell'
+            
+        Returns:
+            float: Adjusted stop loss price
+        """
+        if direction == 'buy':
+            # For buy trades, find nearest support below entry
+            support = self.get_nearest_support(entry_price)
+            
+            if support and support > initial_stop:
+                # Add a small buffer below the support level (0.5%)
+                return support * 0.995
+                
+        else:  # sell trade
+            # For sell trades, find nearest resistance above entry
+            resistance = self.get_nearest_resistance(entry_price)
+            
+            if resistance and resistance < initial_stop:
+                # Add a small buffer above the resistance level (0.5%)
+                return resistance * 1.005
+                
+        return initial_stop
+        
+    def adjust_take_profit(self, entry_price, initial_take_profits, direction):
+        """
+        Adjust take profit levels based on support/resistance
+        
+        Args:
+            entry_price: Entry price
+            initial_take_profits: List of initial take profit prices
+            direction: 'buy' or 'sell'
+            
+        Returns:
+            list: Adjusted take profit prices
+        """
+        take_profits = initial_take_profits.copy()
+        
+        if direction == 'buy':
+            # For buy trades, add resistance levels as take profits
+            for resistance in self.resistance_levels:
+                    if resistance['price'] > entry_price:
+                        take_profits.append(resistance['price'])
+                    
+        else:  # sell trade
+            # For sell trades, add support levels as take profits
+            for support in self.support_levels:
+                    if support['price'] < entry_price:
+                        take_profits.append(support['price'])
+                    
+        # Remove duplicates and sort
+        if direction == 'buy':
+            return sorted(list(set(take_profits)))
+        else:
+            return sorted(list(set(take_profits)), reverse=True)
+
+    def is_at_support(self, price):
+        """
+        Check if the current price is at a support level
+        
+        Args:
+            price: Current price
+            
+        Returns:
+            tuple: (bool, float) - Whether at support and the support level price
+        """
+        if not self.support_levels:
+            return False, None
+            
+        # Check if price is within threshold percentage of any support level
+        threshold = price * (self.price_threshold_pct / 100)
+        
+        for support in self.support_levels:
+            if abs(price - support) <= threshold:
+                return True, support
+                
+        return False, None
+        
+    def is_at_resistance(self, price):
+        """
+        Check if the current price is at a resistance level
+        
+        Args:
+            price: Current price
+            
+        Returns:
+            tuple: (bool, float) - Whether at resistance and the resistance level price
+        """
+        if not self.resistance_levels:
+            return False, None
+            
+        # Check if price is within threshold percentage of any resistance level
+        threshold = price * (self.price_threshold_pct / 100)
+        
+        for resistance in self.resistance_levels:
+            if abs(price - resistance) <= threshold:
+                return True, resistance
+                
+        return False, None
+
+class UltraMaximizedStrategy:
+    """Ultra-aggressive trading strategy with dynamic position sizing and advanced exit management"""
+    
+    def __init__(self, symbol="BTCUSDT", timeframe=None, ultra_aggressive=True,
+                 rsi_buy_threshold=0.05, rsi_sell_threshold=99.95, stop_loss_pct=-2000.0, 
+                 take_profit_levels=None, position_size_multiplier=8000.0, max_concurrent_trades=30,
+                 trading_model=None, enhanced_trading=None, market_regime_detector=None,
+                 position_sizing=None, support_resistance=None, mtf_analysis=None,
+                 mt5_max_order_size = 10000.0):
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.ultra_aggressive = ultra_aggressive
+        
+        self.rsi_buy_threshold = rsi_buy_threshold
+        self.rsi_sell_threshold = rsi_sell_threshold
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_levels = take_profit_levels or [10.0, 50.0, 100.0, 500.0, 1000.0]
+        self.position_size_multiplier = position_size_multiplier
+        self.max_concurrent_trades = max_concurrent_trades
+        self.mt5_max_order_size = mt5_max_order_size
+        
+        # BTCUSDT specific trading parameters
+        self.tick_value = 0.1
+        self.tick_size = 0.1
+        self.stop_level = 100  # Minimum stop level in points
+        self.starting_leverage = 200
+        self.min_order_size = 0.01
+        self.max_order_size = 1000.0
+        
+        # Import MetaTrader5 if available
+        try:
+            import MetaTrader5 as mt5
+            self.mt5_available = True
+            self.mt5 = mt5
+        except ImportError:
+            self.mt5_available = False
+            self.mt5 = None
+        
+        # Strategy components
+        self.trading_model = trading_model or TradingModel()
+        self.enhanced_trading = enhanced_trading or EnhancedTrading(use_ml=True)
+        self.market_regime_detector = market_regime_detector or MarketRegimeDetector(lookback_period=50)
+        self.position_sizing = position_sizing or AdvancedPositionSizing(
+            max_position_size=position_size_multiplier,
+            initial_risk_per_trade=0.02,
+            max_risk_per_trade=0.05,
+            max_open_risk=0.25,
+            volatility_adjustment=True,
+            win_streak_adjustment=True,
+            trend_adjustment=True,
+            account_growth_adjustment=True,
+            min_order_size=self.min_order_size,
+            max_order_size=self.max_order_size
+        )
+        self.support_resistance = support_resistance or SupportResistanceEnhancement()
+        self.mtf_analysis = mtf_analysis
+        
+        # Performance tracking
+        self.trades = []
+        self.balance_history = []
+        self.equity_history = []
+        self.drawdowns = []
+        
+        # Logger
+        self.logger = logging.getLogger(__name__)
+        
+    def backtest(self, df, initial_balance=200000):
+        """
+        Run backtest on historical data
+        
+        Args:
+            df (DataFrame): Historical price data with OHLCV
+            initial_balance (float): Initial account balance
+            
+        Returns:
+            dict: Backtest results
+        """
+        # Ensure we have all required indicators
+        df = add_indicators(df)
+        
+        # Initialize backtest variables
+        balance = initial_balance
+        equity = initial_balance
+        open_positions = []
+        closed_trades = []
+        max_equity = initial_balance
+        max_drawdown = 0
+        win_streak = 0
+        loss_streak = 0
+        daily_trades = defaultdict(int)
+        
+        # Track buy/sell signals
+        potential_buys = 0
+        potential_sells = 0
+        
+        # Process each bar
+        for i in range(100, len(df)):
+            current_time = df.index[i]
+            current_price = df['close'].iloc[i]
+            
+            # Convert current_time to datetime if it's not already
+            if isinstance(current_time, (int, float)):
+                current_time = pd.to_datetime(current_time, unit='s')
+                
+            day_str = current_time.strftime('%Y-%m-%d')
+            
+            # Update support and resistance levels
+            self.support_resistance.update_levels(df.iloc[:i+1])
+            
+            # Check for closed positions first
+            for pos_idx in reversed(range(len(open_positions))):
+                position = open_positions[pos_idx]
+                
+                # Calculate current P&L
+                if position['type'] == 'buy':
+                    current_pl_pct = (current_price / position['entry_price'] - 1) * 100
+                else:  # sell
+                    current_pl_pct = (1 - current_price / position['entry_price']) * 100
+                
+                # Check for stop loss
+                if (position['type'] == 'buy' and current_price <= position['stop_loss']) or \
+                   (position['type'] == 'sell' and current_price >= position['stop_loss']):
+                    # Close at stop loss
+                    position['exit_time'] = current_time
+                    position['exit_price'] = position['stop_loss']
+                    position['profit_loss'] = position['position_size'] * (position['exit_price'] / position['entry_price'] - 1) \
+                                             if position['type'] == 'buy' else \
+                                             position['position_size'] * (1 - position['exit_price'] / position['entry_price'])
+                    position['profit_pct'] = (position['exit_price'] / position['entry_price'] - 1) * 100 \
+                                            if position['type'] == 'buy' else \
+                                            (1 - position['exit_price'] / position['entry_price']) * 100
+                    position['status'] = 'closed'
+                    position['exit_reason'] = 'Stop Loss'
+                    
+                    # Update balance
+                    balance += position['profit_loss']
+                    
+                    # Update win/loss streak
+                    if position['profit_loss'] > 0:
+                        win_streak += 1
+                        loss_streak = 0
+                    else:
+                        win_streak = 0
+                        loss_streak += 1
+                    
+                    # Add to closed trades
+                    closed_trades.append(position)
+                    
+                    # Remove from open positions
+                    open_positions.pop(pos_idx)
+                    continue
+                
+                # Check for take profit
+                for tp_price in position['take_profit']:
+                    if (position['type'] == 'buy' and current_price >= tp_price) or \
+                       (position['type'] == 'sell' and current_price <= tp_price):
+                        # Close at take profit
+                        position['exit_time'] = current_time
+                        position['exit_price'] = tp_price
+                        position['profit_loss'] = position['position_size'] * (position['exit_price'] / position['entry_price'] - 1) \
+                                                 if position['type'] == 'buy' else \
+                                                 position['position_size'] * (1 - position['exit_price'] / position['entry_price'])
+                        position['profit_pct'] = (position['exit_price'] / position['entry_price'] - 1) * 100 \
+                                                if position['type'] == 'buy' else \
+                                                (1 - position['exit_price'] / position['entry_price']) * 100
+                        position['status'] = 'closed'
+                        position['exit_reason'] = 'Take Profit'
+                        
+                        # Update balance
+                        balance += position['profit_loss']
+                        
+                        # Update win/loss streak
+                        if position['profit_loss'] > 0:
+                            win_streak += 1
+                            loss_streak = 0
+                        else:
+                            win_streak = 0
+                            loss_streak += 1
+                        
+                        # Add to closed trades
+                        closed_trades.append(position)
+                        
+                        # Remove from open positions
+                        open_positions.pop(pos_idx)
+                        break
+            
+            # Calculate current equity
+            open_equity = sum(
+                position['position_size'] * (current_price / position['entry_price'] - 1) if position['type'] == 'buy' else
+                position['position_size'] * (1 - current_price / position['entry_price'])
+                for position in open_positions
+            )
+            equity = balance + open_equity
+            
+            # Track maximum equity and drawdown
+            if equity > max_equity:
+                max_equity = equity
+            
+            current_drawdown = (max_equity - equity) / max_equity * 100 if max_equity > 0 else 0
+            max_drawdown = max(max_drawdown, current_drawdown)
+            
+            # Track equity history
+            self.equity_history.append((current_time, equity))
+            
+            # Check for new trading opportunities
+            if len(open_positions) < self.max_concurrent_trades and daily_trades[day_str] < 20:
+                # Get current indicators
+                rsi = df['rsi'].iloc[i]
+                
+                # Get market regime
+                market_regime = self.market_regime_detector.detect_regime(df.iloc[:i+1])
+                
+                # Calculate trend strength
+                trend_strength = self.market_regime_detector.get_trend_strength(df.iloc[:i+1])
+                
+                # Calculate volatility
+                volatility = self.market_regime_detector.get_volatility(df.iloc[:i+1])
+                
+                # Get buy probability from ML model
+                buy_probability = self.enhanced_trading.predict(df.iloc[i-20:i+1])
+                sell_probability = 1 - buy_probability
+                
+                # Check for buy signal
+                at_support, support_level = self.support_resistance.is_at_support(current_price)
+                buy_signal = (
+                    rsi <= self.rsi_buy_threshold or 
+                    (rsi <= 30 and at_support) or 
+                    buy_probability >= 0.8
+                )
+                
+                # Check for sell signal
+                at_resistance, resistance_level = self.support_resistance.is_at_resistance(current_price)
+                sell_signal = (
+                    rsi >= self.rsi_sell_threshold or 
+                    (rsi >= 70 and at_resistance) or 
+                    sell_probability >= 0.8
+                )
+                
+                # Track potential signals
+                if buy_signal:
+                    potential_buys += 1
+                if sell_signal:
+                    potential_sells += 1
+                
+                # Execute trades if signals are valid
+                if buy_signal:
+                    # Calculate position size
+                    position_size = self.position_sizing.calculate_position_size(
+                        market_regime, trend_strength, volatility, buy_probability, win_streak, loss_streak
+                    )
+                    
+                    # Cap position size for safety
+                    position_size = min(position_size, self.mt5_max_order_size)
+                    
+                    # Execute buy trade
+                    trade = self.execute_trade(
+                        df, i, 'buy', current_price, self.stop_loss_pct, 
+                        self.take_profit_levels, position_size
+                    )
+                    
+                    # Add to open positions
+                    open_positions.append(trade)
+                    
+                    # Track daily trades
+                    daily_trades[day_str] += 1
+                
+                elif sell_signal:
+                    # Calculate position size
+                    position_size = self.position_sizing.calculate_position_size(
+                        market_regime, trend_strength, volatility, sell_probability, win_streak, loss_streak
+                    )
+                    
+                    # Cap position size for safety
+                    position_size = min(position_size, self.mt5_max_order_size)
+                    
+                    # Execute sell trade
+                    trade = self.execute_trade(
+                        df, i, 'sell', current_price, self.stop_loss_pct, 
+                        self.take_profit_levels, position_size
+                    )
+                    
+                    # Add to open positions
+                    open_positions.append(trade)
+                    
+                    # Track daily trades
+                    daily_trades[day_str] += 1
+        
+        # Close any remaining open positions at the last price
+        last_price = df['close'].iloc[-1]
+        last_time = df.index[-1]
+        
+        for position in open_positions:
+            position['exit_time'] = last_time
+            position['exit_price'] = last_price
+            position['profit_loss'] = position['position_size'] * (position['exit_price'] / position['entry_price'] - 1) \
+                                     if position['type'] == 'buy' else \
+                                     position['position_size'] * (1 - position['exit_price'] / position['entry_price'])
+            position['profit_pct'] = (position['exit_price'] / position['entry_price'] - 1) * 100 \
+                                    if position['type'] == 'buy' else \
+                                    (1 - position['exit_price'] / position['entry_price']) * 100
+            position['status'] = 'closed'
+            position['exit_reason'] = 'End of Backtest'
+            
+            # Update balance
+            balance += position['profit_loss']
+            
+            closed_trades.append(position)
+        
+        # Calculate performance metrics
+        total_trades = len(closed_trades)
+        winning_trades = sum(1 for trade in closed_trades if trade['profit_loss'] > 0)
+        losing_trades = total_trades - winning_trades
+        
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        total_profit = sum(trade['profit_loss'] for trade in closed_trades if trade['profit_loss'] > 0)
+        total_loss = abs(sum(trade['profit_loss'] for trade in closed_trades if trade['profit_loss'] < 0))
+        
+        profit_factor = total_profit / total_loss if total_loss > 0 else float('inf')
+        
+        avg_profit_per_trade = sum(trade['profit_loss'] for trade in closed_trades) / total_trades if total_trades > 0 else 0
+        
+        # Calculate average win/loss percentages
+        if winning_trades > 0:
+            avg_win_pct = sum((trade['exit_price'] / trade['entry_price'] - 1) * 100 if trade['type'] == 'buy' else
+                             (1 - trade['exit_price'] / trade['entry_price']) * 100
+                             for trade in closed_trades if trade['profit_loss'] > 0) / winning_trades
+            largest_win_pct = max((trade['exit_price'] / trade['entry_price'] - 1) * 100 if trade['type'] == 'buy' else
+                                (1 - trade['exit_price'] / trade['entry_price']) * 100
+                                for trade in closed_trades if trade['profit_loss'] > 0)
+        else:
+            avg_win_pct = 0
+            largest_win_pct = 0
+            
+        if losing_trades > 0:
+            avg_loss_pct = sum((trade['exit_price'] / trade['entry_price'] - 1) * 100 if trade['type'] == 'buy' else
+                              (1 - trade['exit_price'] / trade['entry_price']) * 100
+                              for trade in closed_trades if trade['profit_loss'] <= 0) / losing_trades
+            largest_loss_pct = min((trade['exit_price'] / trade['entry_price'] - 1) * 100 if trade['type'] == 'buy' else
+                                 (1 - trade['exit_price'] / trade['entry_price']) * 100
+                                 for trade in closed_trades if trade['profit_loss'] <= 0)
+        else:
+            avg_loss_pct = 0
+            largest_loss_pct = 0
+            
+        # Calculate average trade duration
+        trade_durations = [(pd.Timestamp(trade['exit_time']) - pd.Timestamp(trade['entry_time'])).total_seconds() / 60 for trade in closed_trades]
+        avg_trade_duration = sum(trade_durations) / len(trade_durations) if trade_durations else 0
+        
+        # Count exit reasons
+        exit_reasons = {}
+        for trade in closed_trades:
+            reason = trade['exit_reason']
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+            
+        # Count buy/sell trades
+        buy_trades = sum(1 for trade in closed_trades if trade['type'] == 'buy')
+        sell_trades = sum(1 for trade in closed_trades if trade['type'] == 'sell')
+        
+        # Calculate Sharpe ratio (simplified)
+        if len(self.equity_history) > 1:
+            equity_values = [eq[1] for eq in self.equity_history]
+            returns = [(equity_values[i] / equity_values[i-1] - 1) for i in range(1, len(equity_values))]
+            sharpe_ratio = (sum(returns) / len(returns)) / (statistics.stdev(returns) if len(returns) > 1 else 0.01) * math.sqrt(252 * 24 * 60 / 5)  # Annualized
+        else:
+            sharpe_ratio = 0
+            
+        # Store all trades
+        self.trades = closed_trades
+        
+        # Return results
+        return {
+            'initial_balance': initial_balance,
+            'final_balance': balance,
+            'total_return_pct': (balance / initial_balance - 1) * 100,
+            'total_trades': total_trades,
+            'win_rate': win_rate,
+            'profit_factor': profit_factor,
+            'avg_profit_per_trade': avg_profit_per_trade,
+            'max_drawdown_pct': max_drawdown,
+            'potential_buys': potential_buys,
+            'potential_sells': potential_sells,
+            'buy_trades': buy_trades,
+            'sell_trades': sell_trades,
+            'avg_win_pct': avg_win_pct,
+            'avg_loss_pct': avg_loss_pct,
+            'largest_win_pct': largest_win_pct,
+            'largest_loss_pct': largest_loss_pct,
+            'avg_trade_duration': avg_trade_duration,
+            'exit_reasons': exit_reasons,
+            'sharpe_ratio': sharpe_ratio,
+            'closed_trades': closed_trades
+        }
+
+    def execute_trade(self, df, i, signal_type, entry_price, stop_loss_pct, take_profit_levels, position_size):
+        """
+        Execute a trade with the given parameters, adjusting stop loss and take profit based on support and resistance
+        
+        Args:
+            df: DataFrame with price data and indicators
+            i: Current index in the dataframe
+            signal_type: 'buy' or 'sell'
+            entry_price: Entry price for the trade
+            stop_loss_pct: Stop loss percentage (negative for buy, positive for sell)
+            take_profit_levels: List of take profit percentages
+            position_size: Position size to trade
+            
+        Returns:
+            dict: Trade details
+        """
+        # Get current price data
+        current_row = df.iloc[i]
+        
+        # Ensure position size respects MT5 limits for live trading
+        position_size = min(position_size, self.max_order_size)
+        position_size = max(position_size, self.min_order_size)
+        
+        # Round position size to 2 decimal places (0.01 precision for BTCUSDT)
+        position_size = round(position_size, 2)
+        
+        # Calculate base stop loss price
+        if signal_type == 'buy':
+            # For buy trades, stop loss is below entry price
+            stop_loss_price = entry_price * (1 + stop_loss_pct / 100)
+        else:
+            # For sell trades, stop loss is above entry price
+            stop_loss_price = entry_price * (1 + stop_loss_pct / 100)
+        
+        # Calculate take profit prices
+        take_profit_prices = []
+        for tp_level in take_profit_levels:
+            if signal_type == 'buy':
+                # For buy trades, take profit is above entry price
+                tp_price = entry_price * (1 + tp_level / 100)
+            else:
+                # For sell trades, take profit is below entry price
+                tp_price = entry_price * (1 - tp_level / 100)
+            take_profit_prices.append(tp_price)
+        
+        # Get support and resistance levels if available
+        support_resistance_levels = None
+        if self.mtf_analysis:
+            support_resistance_levels = self.mtf_analysis.get_support_resistance_levels()
+        
+        # Adjust stop loss based on support and resistance levels
+        if support_resistance_levels:
+            if signal_type == 'buy':
+                # For buy trades, find the closest support level below entry price
+                supports = support_resistance_levels.get('support', [])
+                closest_support = None
+                closest_distance = float('inf')
+                
+                for support in supports:
+                    # Extract the price from the support dictionary
+                    support_price = support['price']
+                    if support_price < entry_price:
+                        distance = entry_price - support_price
+                        if distance < closest_distance:
+                            closest_distance = distance
+                            closest_support = support_price
+                
+                # Only adjust if the support level is higher than the calculated stop loss
+                if closest_support and closest_support > stop_loss_price:
+                    # Add a small buffer below the support level (0.5%)
+                    adjusted_stop = closest_support * 0.995
+                    
+                    # Ensure the stop loss respects the minimum stop level
+                    min_stop_distance = self.stop_level * self.tick_value
+                    if entry_price - adjusted_stop >= min_stop_distance:
+                        stop_loss_price = adjusted_stop
+            else:  # sell trade
+                # For sell trades, find the closest resistance level above entry price
+                resistances = support_resistance_levels.get('resistance', [])
+                closest_resistance = None
+                closest_distance = float('inf')
+                
+                for resistance in resistances:
+                    # Extract the price from the resistance dictionary
+                    resistance_price = resistance['price']
+                    if resistance_price > entry_price:
+                        distance = resistance_price - entry_price
+                        if distance < closest_distance:
+                            closest_distance = distance
+                            closest_resistance = resistance_price
+                
+                # Only adjust if the resistance level is lower than the calculated stop loss
+                if closest_resistance and closest_resistance < stop_loss_price:
+                    # Add a small buffer above the resistance level (0.5%)
+                    adjusted_stop = closest_resistance * 1.005
+                    
+                    # Ensure the stop loss respects the minimum stop level
+                    min_stop_distance = self.stop_level * self.tick_value
+                    if adjusted_stop - entry_price >= min_stop_distance:
+                        stop_loss_price = adjusted_stop
+        
+        # Adjust take profit targets based on support and resistance
+        if support_resistance_levels:
+            adjusted_take_profits = []
+            
+            if signal_type == 'buy':
+                # For buy trades, use resistance levels as additional take profit targets
+                resistances = support_resistance_levels.get('resistance', [])
+                
+                # Add resistance levels that are above entry price as potential take profit targets
+                for resistance in resistances:
+                    if resistance['price'] > entry_price:
+                        adjusted_take_profits.append(resistance['price'])
+            else:  # sell trade
+                # For sell trades, use support levels as additional take profit targets
+                supports = support_resistance_levels.get('support', [])
+                
+                # Add support levels that are below entry price as potential take profit targets
+                for support in supports:
+                    if support['price'] < entry_price:
+                        adjusted_take_profits.append(support['price'])
+            
+            # Combine original take profit levels with support/resistance levels
+            take_profit_prices.extend(adjusted_take_profits)
+            
+            # Remove duplicates and sort
+            if signal_type == 'buy':
+                take_profit_prices = sorted(list(set(take_profit_prices)))
+            else:
+                take_profit_prices = sorted(list(set(take_profit_prices)), reverse=True)
+        
+        # Create trade object
+        trade = {
+            'entry_time': df.index[i],
+            'entry_price': entry_price,
+            'type': signal_type,
+            'stop_loss': stop_loss_price,
+            'take_profit': take_profit_prices,
+            'position_size': position_size,
+            'status': 'open',
+            'exit_time': None,
+            'exit_price': None,
+            'profit_loss': 0,
+            'exit_reason': None
+        }
+        
+        return trade
